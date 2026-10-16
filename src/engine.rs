@@ -59,6 +59,8 @@ pub enum EngineError {
     Join(String),
     #[error("search was cancelled")]
     Cancelled,
+    #[error("analysis failed: {0}")]
+    Analysis(String),
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;
@@ -623,6 +625,120 @@ impl FileEngine {
                 });
             }
         }
+    }
+
+    pub async fn extract_strings(
+        self: &Arc<Self>,
+        request: crate::analyze::StringsRequest,
+    ) -> Result<crate::analyze::StringsResponse> {
+        let permit = self
+            .query_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| EngineError::NotReady("server is shutting down".to_owned()))?;
+        let opened = self.ready_file().await?;
+        let engine = Arc::clone(self);
+        run_blocking(move || {
+            let _permit = permit;
+            let result = crate::analyze::extract_strings(
+                &opened.source.canonical_path,
+                &opened.index,
+                request,
+            )
+            .map_err(EngineError::from);
+            engine.finish_query_blocking(&opened, result)
+        })
+        .await?
+    }
+
+    pub async fn build_call_tree(
+        self: &Arc<Self>,
+        request: crate::analyze::CallTreeRequest,
+    ) -> Result<crate::analyze::CallTreeResponse> {
+        let permit = self
+            .query_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| EngineError::NotReady("server is shutting down".to_owned()))?;
+        let opened = self.ready_file().await?;
+        let export_root = self.config.export_root.clone();
+        run_blocking(move || {
+            let _permit = permit;
+            crate::analyze::build_call_tree(&opened.source.canonical_path, &export_root, request)
+                .map_err(EngineError::Analysis)
+        })
+        .await?
+    }
+
+    pub async fn list_sources(
+        self: &Arc<Self>,
+        request: crate::analyze::SourcesRequest,
+    ) -> Result<crate::analyze::SourcesResponse> {
+        let permit = self
+            .query_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| EngineError::NotReady("server is shutting down".to_owned()))?;
+        let opened = self.ready_file().await?;
+        let engine = Arc::clone(self);
+        run_blocking(move || {
+            let _permit = permit;
+            let result =
+                crate::analyze::list_sources(&opened.source.canonical_path, &opened.index, request)
+                    .map_err(EngineError::from);
+            engine.finish_query_blocking(&opened, result)
+        })
+        .await?
+    }
+
+    pub async fn query_memory(
+        self: &Arc<Self>,
+        request: crate::analyze::MemoryRequest,
+    ) -> Result<crate::analyze::MemoryResponse> {
+        let permit = self
+            .query_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| EngineError::NotReady("server is shutting down".to_owned()))?;
+        let opened = self.ready_file().await?;
+        let engine = Arc::clone(self);
+        run_blocking(move || {
+            let _permit = permit;
+            let result =
+                crate::analyze::query_memory(&opened.source.canonical_path, &opened.index, request)
+                    .map_err(EngineError::from);
+            engine.finish_query_blocking(&opened, result)
+        })
+        .await?
+    }
+
+    pub async fn taint_backward(
+        self: &Arc<Self>,
+        request: crate::analyze::TaintRequest,
+    ) -> Result<crate::analyze::TaintResponse> {
+        let permit = self
+            .query_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| EngineError::NotReady("server is shutting down".to_owned()))?;
+        let opened = self.ready_file().await?;
+        let export_root = self.config.export_root.clone();
+        run_blocking(move || {
+            let _permit = permit;
+            crate::analyze::taint(
+                &opened.source.canonical_path,
+                &opened.index,
+                &export_root,
+                request,
+            )
+            .map_err(EngineError::Analysis)
+        })
+        .await?
     }
 
     async fn ready_file(&self) -> Result<Arc<OpenedFile>> {
