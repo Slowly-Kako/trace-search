@@ -2,6 +2,8 @@
 
 一个使用 Rust 编写、仅通过 MCP Streamable HTTP 暴露能力的超大文本文件查询服务。它面向 800 GiB 以上的只读、按行组织的日志或 trace 文件，不会把整个文件映射或加载进内存。
 
+在读取、正则/字面量搜索、原样导出之外，还内置了面向 ARM64 指令 trace（GumTrace/Frida 风格，每行带寄存器与 `mem_r`/`mem_w` 读写值、`str:"..."` 等）的结构化分析工具：运行时字符串、调用树、内存访问历史、动态污点切片与污点源识别。
+
 ## 功能
 
 - 同一时刻只允许一个活动文件。
@@ -11,6 +13,7 @@
 - 从指定行开始，在限定行数内执行高效字面量搜索。
 - 将指定行范围原样、流式、原子地保存到指定路径。
 - 索引中断后可从最后一个有效检查点继续。
+- 面向 ARM64 指令 trace 的分析：运行时字符串提取、调用树重建、内存访问历史、动态污点切片（前向/反向、可选控制依赖）、污点源自动识别。
 - HTTP Bearer Token、Host 校验和可选 Origin 校验。
 
 ## 快速启动
@@ -118,6 +121,59 @@ MCP 地址：`http://127.0.0.1:8080/mcp`
 ### `close_file`
 
 无参数。关闭活动文件；若正在建立索引，则请求取消。已经完成或部分完成的索引不会被删除。
+
+## 分析工具（面向 ARM64 指令 trace）
+
+以下工具在读取/搜索/导出之上，针对 GumTrace/Frida 风格的 ARM64 指令 trace 做结构化分析。它们复用已建的行索引，直接解析每行自带的寄存器与内存读写值（`reg=0x..`、`mem_r[..]`、`mem_w[..]=0x..`、`str:"..."`、`nzcv:` 等），无需指令集语义建模。分析类工具的输出文件（调用树、污点切片）写入 `--export-root`。
+
+### `get_strings`
+
+提取 tracer 内联解码的运行时字符串 `str:"..."`，去重并带出现次数与首次出现行。
+
+```json
+{ "start_line": 1, "max_scan_lines": 1000000, "min_len": 4, "contains": "mode", "max_results": 1000 }
+```
+
+### `get_call_tree`
+
+用 `bl`/`blr`/`ret` 重建函数调用树与调用图，输出 `<名>_calltree.txt` 和 `<名>_callgraph.txt` 到 export 根目录，并返回摘要、热点函数与预览。`so` 可按模块过滤，`entry_hex` 指定根偏移（十六进制）。内置 `scripts/build_calltree.py`，运行需要 `python3`。
+
+```json
+{ "so": "libfoo.so", "entry_hex": "1a2b4", "max_lines": 50000000, "preview_lines": 60 }
+```
+
+### `get_memory`
+
+扫描某地址/区段 `[address, address+length)` 的全部读写历史（行号、读/写、值，以及**完整原始行**），并给出 `value_at`——截至 `up_to_line` 最近一次写入的值（可用于重建该时刻内存内容）。`address_hex` 接受带或不带 `0x`。
+
+```json
+{ "address_hex": "0x7fff1234", "length": 16, "up_to_line": 200000, "max_events": 500 }
+```
+
+### `taint_analysis`
+
+动态污点切片。源可以是寄存器（`registers`，如 `["x0"]`）、单地址（`addresses`）、或区段（`regions`，整段输入数组/缓冲区，可直接取自 `list_sources`），锚定在 `target_line`。
+
+- `direction=backward`（默认）：保留所有参与算出该源的更早的行。
+- `direction=forward`：保留该源之后影响到的所有行（单遍流式，可扩展到超大 trace）。
+- `include_control_deps=true`（仅 backward）：额外纳入决定这些行是否执行的分支判断（默认仅数据流）。
+- `mode=filter`（默认）只写污点行、逐字节原样；`mode=highlight` 写整文件、污点行加 `» ` 前缀。
+
+响应返回污点行号与前若干条完整原始行，并把切片写到 export 根目录的 `<名>_taint.txt`。
+
+```json
+{ "direction": "forward", "target_line": 21,
+  "regions": [{ "address_hex": "0xb4000073d7a3dad0", "length": 320 }],
+  "mode": "filter" }
+```
+
+### `list_sources`
+
+扫描 JNI 与 `[CALL]` 标记，自动识别天然的污点源：分配缓冲区（malloc/calloc/realloc）、JNI 输入数组/字符串（`Get*ArrayElements`、`GetStringUTFChars`）、JNI 输出区（`Set*ArrayRegion`）、内存拷贝（memcpy/memmove）。每个候选带行号、指针、已知大小与建议方向，可直接喂给 `taint_analysis`。
+
+```json
+{ "start_line": 1, "max_scan_lines": 1000000, "max_results": 200 }
+```
 
 ## 性能模型
 
